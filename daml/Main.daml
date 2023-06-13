@@ -1,0 +1,191 @@
+module Main where
+
+import DA.List (dedup)
+import DA.Date (subDate)
+import DA.Optional
+
+
+-- | holds the available status for a proposal
+-- proposal that is already approved will be archived and a separate Training contract will be created instead (so no need to have "approved" status here)
+data ProposalStatus = Pending | Rejected | Updated
+    deriving (Eq, Show)
+
+-- | holds the available types of training that can be proposed
+-- | virtual and classroom type of training can only be approved 1 week before it should start - to give way for preparation
+data TrainingType = Virtual | Classroom | Online
+    deriving (Eq, Show)
+
+-- | holds the details of the training plan
+-- possible updates here is to add in optional fees, needed budget, location etc. (which are out of scope as of now)
+data TrainingPlan = TrainingPlan 
+    with
+        title: Text
+        courseDescription: Text
+        objectives: Text
+        preRequisites: Optional [Text]
+        audience: [Party]
+        trainingType: TrainingType
+        startDate: Date
+        endDate: Date
+            deriving (Eq, Show)
+    
+
+-- | template that can be use by a proposer to create proposals
+-- assumption: proposal date pass is the current date
+template TrainingRights
+    with
+        issuer: Party
+        employee: Party
+    where 
+        signatory issuer
+        observer employee
+
+        key (issuer, employee): (Party, Party)
+        maintainer key._1
+
+        -- choice that can create a proposal for the inputed supervisor
+        nonconsuming choice CreateTrainingPlanProposal: ContractId TrainingPlanProposal
+            with trainingPlan: TrainingPlan, proposalDate: Date, supervisor: Party
+            controller employee
+            do
+                isProposalFound <- visibleByKey @TrainingPlanProposal (employee, trainingPlan.title)
+                assertMsg ("Error: There is already an existing training proposal for " <> trainingPlan.title) (not isProposalFound)
+
+                isTraingFound <- visibleByKey @Training (employee, trainingPlan.title)
+                assertMsg ("Error: There is already an approved training for " <> trainingPlan.title) (not isTraingFound)
+
+                assertMsg "Error: You can't be the approver of the proposal you created." (employee /= supervisor)
+                assertMsg "Error: End Date should be equal or greater than the Start Date." (trainingPlan.endDate >= trainingPlan.startDate)
+                assertMsg "Error: Start Date can't be before proposal date." (proposalDate < trainingPlan.startDate)
+                assertMsg "Error: Proposal should be submitted at least 30 days prior training date plans." ((subDate trainingPlan.startDate proposalDate) >= 30)
+                
+                create TrainingPlanProposal with status = Pending, supervisorNotes = None, proposer = employee, ..
+
+        -- choice that can query given proposal cid (visible to the controller)
+        nonconsuming choice CheckProposalViaCid: TrainingPlanProposal
+            with cid: ContractId TrainingPlanProposal
+            controller employee
+            do
+                fetch cid
+
+        -- choice that can query given approved cid (visible to the controller)
+        nonconsuming choice CheckApproveTrainingViaCid: Training
+            with cid: ContractId Training
+            controller employee
+            do
+                fetch cid
+
+        -- choice that can query a proposal or approve training contract details for a given training title or list of training title (visible to the controller)
+        nonconsuming choice CheckViaTitle: [Either (Optional TrainingPlanProposal) (Optional Training)]
+            with titles: [Text]
+            controller employee
+            do
+                mapA (\title -> do
+                    result <- visibleByKey @TrainingPlanProposal (employee, title)
+
+                    if (not result) then
+                        do
+                            result <- visibleByKey @Training (employee, title)
+                            if (result) then
+                                do 
+                                    contract <- fetchByKey @Training (employee, title)
+                                    return (Right (Some contract._2))
+                            else
+                                do
+                                    return (Right None)
+                    else
+                        do
+                            contract <- fetchByKey @TrainingPlanProposal (employee, title)
+                            return (Left (Some contract._2))
+                    ) titles
+
+
+-- | template that is created to propose the training plan to the proposer's supervisor
+template TrainingPlanProposal
+    with
+        proposer: Party
+        supervisor: Party
+        proposalDate: Date
+        trainingPlan: TrainingPlan
+        status: ProposalStatus
+        supervisorNotes: Optional Text
+    where
+        signatory proposer
+        observer supervisor
+
+        key (proposer, trainingPlan.title): (Party, Text)
+        maintainer key._1
+
+        ensure not (Prelude.null trainingPlan.audience)
+            && trainingPlan.title /= ""
+            && trainingPlan.courseDescription /= ""
+            && trainingPlan.objectives /= ""
+            && trainingPlan.endDate >= trainingPlan.startDate
+            && proposer /= supervisor
+            && proposalDate < trainingPlan.startDate
+            && (subDate trainingPlan.startDate proposalDate) >= 30
+
+
+        -- choice where a supervisor can approve the proposal
+        -- (1) if the proposal is rejected, it can't be approved
+        -- (2) if the proposal is virtual/classroom training, the training should not be due in less than a week
+        choice Approve: ContractId Training
+            with trainingTeam: Party, approvalDate: Date
+            controller supervisor
+            do
+                assertMsg "Error: Can't approved a proposal with Rejected status." (status /= Rejected)
+                assertMsg "Error: Can't approved virtual/classroom training that is due in less than a week." 
+                    ((trainingPlan.trainingType == Classroom || trainingPlan.trainingType == Virtual) && (subDate trainingPlan.startDate approvalDate) >= 7)
+
+                create Training with audience = [], published = False, publishedDate = None, ..
+
+        -- choice where a supervisor can approve the proposal
+        -- (1) supervisor notes is required for rejection
+        choice Reject: ContractId TrainingPlanProposal
+            with supervisorNotes: Optional Text
+            controller supervisor
+            do
+                assertMsg "Error: You need to provide supervisor notes for rejected proposals." (isSome supervisorNotes)
+                create this with status = Rejected, supervisorNotes
+
+        -- choice where proposer can modify his proposal
+        choice UpdateProposal: ContractId TrainingPlanProposal
+            with updatedTrainingPlan: TrainingPlan
+            controller proposer
+            do
+                create this with trainingPlan = updatedTrainingPlan, status = Updated
+
+        -- choice where proposer can cancel/remove his proposal
+        choice CancelProposal: ()
+            controller proposer
+            do
+                return ()
+
+
+-- | holds the approved Trainings that can already be published to the expected audiences
+-- this can be use for registration purposes (but that is currently out of scope for now)
+-- assumption: published date pass is the current date
+template Training
+    with
+        proposer: Party
+        supervisor: Party
+        approvalDate: Date
+        trainingTeam: Party
+        trainingPlan: TrainingPlan
+        published: Bool
+        publishedDate: Optional Date
+        audience: [Party]
+    where 
+        signatory proposer, supervisor
+        observer trainingTeam, audience
+
+        key (proposer, trainingPlan.title): (Party, Text)
+        maintainer key._1
+
+        -- choice that the trainingTeam can use to publish the Training details to the expected audience
+        choice Publish: ContractId Training
+            with publishedDate: Optional Date
+            controller trainingTeam
+            do
+                assertMsg "Error: This is already published!" (not published)
+                create this with audience = dedup trainingPlan.audience, published = True, publishedDate

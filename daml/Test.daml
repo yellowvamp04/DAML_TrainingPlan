@@ -1,0 +1,317 @@
+module Test where
+
+import Daml.Script
+import DA.Date
+import DA.Optional
+
+import Main
+import Setup
+
+
+-- | Create Training Proposal: Proposer proposes training plan for supervisor's approval
+test_createTrainingProposal = script do
+    -- allocate parties and setup the training right for the proposer
+    (testParties@TestParties{..}, trainingRights) <- setupUsers
+
+    -- create training proposal plan for approval
+    let trainingPlan = TrainingPlan
+            with title = "Brownbag: Java Springboot", courseDescription = "1-week Java Springboot refresher training", 
+                    objectives = "To ensure that our developers still are capable to develop java applications using springboot for future projects/oppotunitites.", 
+                    preRequisites = Some ["Springboot trained/knowledgeable", ""], 
+                    audience = [employeeLevel2, employeeLevel3],  trainingType = Classroom,  
+                    startDate = date 2023 Jul 24, endDate = date 2023 Jul 28
+
+    let proposalDate = date 2023 Jun 08
+    proposalCid <- submit proposer do exerciseCmd trainingRights CreateTrainingPlanProposal with ..
+
+    -- verify whether contract is seen by expected parties
+    result <- queryContractIdFound testParties proposalCid
+    assert (isSome result._1 && isSome result._2 && isNone result._3
+        && isNone result._4._1 && isNone result._4._2 && isNone result._4._3)
+
+    return (testParties, proposalCid)
+
+
+-- | Training Proposal Approval Flow: Supervisor approves the training plan proposal and sending it to the Training Team to publish. 
+-- | This also includes training team publishing the Approved Training to expected audience types (which employees levels will be able to search/register for the training)
+-- Note: The search/registration for training is out of scope of this project as of the moment
+test_approveProposal_flow = script do
+    (testParties@TestParties{..}, proposalCid) <- test_createTrainingProposal
+    result <- approveAndValidateTrainingPlan testParties proposalCid
+    return (testParties, result)
+
+
+-- | Training Proposal Update: Supervisor rejects the proposal and ask for revision.
+test_rejectProposal = script do
+    (testParties@TestParties{..}, proposalCid) <- test_createTrainingProposal
+
+    -- reject the training plan proposal
+    rejectProposalCid <- rejectTrainingPlanProposal supervisor proposalCid (Some "Update the course description")
+
+    -- verify whether contract is seen by expected parties
+    result <- queryContractIdFound testParties rejectProposalCid
+    assert (isSome result._1 && isSome result._2 && isNone result._3
+        && isNone result._4._1 && isNone result._4._2 && isNone result._4._3)
+
+    return (testParties, proposalCid, rejectProposalCid)
+
+
+-- | Training Proposal Update: Proposer updates the rejected proposal
+test_updateRejectedProposal = script do
+    (testParties@TestParties{..}, oldProposalCid, rejectProposalCid) <- test_rejectProposal
+
+    -- update the training plan proposal
+    updatedProposalCid <- updateTrainingPlanProposal proposer rejectProposalCid
+
+    -- verify whether contract is seen by expected parties
+    result <- queryContractIdFound testParties updatedProposalCid
+    assert (isSome result._1 && isSome result._2 && isNone result._3
+        && isNone result._4._1 && isNone result._4._2 && isNone result._4._3)
+
+    return (testParties, updatedProposalCid)
+
+
+-- | Updated Training Proposal Approval: Supervisor approves the revised training proposal and shares to training team.
+-- | This also includes training team publishing the Approved Training to expected audience types (which employees levels will be able to search/register for the training)
+-- Note: The search/registration for training is out of scope of this project as of the moment
+test_approveUpdatedProposal_flow = script do
+    (testParties@TestParties{..}, updatedCid) <- test_updateRejectedProposal
+    result <- approveAndValidateTrainingPlan testParties updatedCid
+    return (testParties, result)
+
+
+{-- Other Tests --}
+-- | Testing the 'ensure/assertion' in place at the create training proposal
+test_validationTrainingProposal = script do
+    -- allocate parties and setup the training right for the proposer
+    (testParties@TestParties{..}, trainingRights) <- setupUsers
+
+    let trainingPlan = TrainingPlan
+            with title = "Brownbag: Java Springboot", courseDescription = "1-week Java Springboot refresher training", 
+                    objectives = "To ensure that our developers still are capable to develop java applications using springboot for future projects/oppotunitites.", 
+                    preRequisites = Some ["Springboot trained/knowledgeable", ""], 
+                    audience = [employeeLevel2, employeeLevel3],  trainingType = Classroom,  
+                    startDate = date 2023 Jul 24, endDate = date 2023 Jul 28
+
+    let proposalDate = date 2023 Jun 08
+
+    -- verify that we can't create proposal with same proposer and supervisor
+    submitMustFail proposer do exerciseCmd trainingRights CreateTrainingPlanProposal with supervisor = proposer, ..
+
+    -- verify that we can't create proposal with no value on title
+    let trainingPlan2 = trainingPlan with title = ""
+    submitMustFail proposer do exerciseCmd trainingRights CreateTrainingPlanProposal with trainingPlan = trainingPlan2, ..   
+
+    -- verify that we can't create proposal with no value on courseDescription
+    let trainingPlan3 = trainingPlan with courseDescription = ""
+    submitMustFail proposer do exerciseCmd trainingRights CreateTrainingPlanProposal with trainingPlan = trainingPlan3, .. 
+
+    -- verify that we can't create proposal with no value on courseDescription
+    let trainingPlan3 = trainingPlan with courseDescription = ""
+    submitMustFail proposer do exerciseCmd trainingRights CreateTrainingPlanProposal with trainingPlan = trainingPlan3, .. 
+
+    -- verify that we can't create proposal with start date greater than endDate
+    let trainingPlan4 = trainingPlan with startDate = date 2023 Jul 29
+    assert (trainingPlan4.startDate > trainingPlan4.endDate)
+    submitMustFail proposer do exerciseCmd trainingRights CreateTrainingPlanProposal with trainingPlan = trainingPlan4, .. 
+
+    -- verify that we can't create proposal with start date less than proposal date
+    let trainingPlan5 = trainingPlan with startDate = date 2023 Jun 7
+    assert (trainingPlan5.startDate < trainingPlan5.endDate)
+    submitMustFail proposer do exerciseCmd trainingRights CreateTrainingPlanProposal with trainingPlan = trainingPlan5, ..
+
+    -- verify that we can't create proposal with less than 30 days prior start (compared to the proposal date)
+    let trainingPlan6 = trainingPlan with startDate = date 2023 Jun 10
+    assert ((subDate trainingPlan6.startDate proposalDate) < 30)
+    submitMustFail proposer do exerciseCmd trainingRights CreateTrainingPlanProposal with trainingPlan = trainingPlan6, ..
+
+    -- verify we can't create same existing training plan proposal
+    -- (1) submit a valid training proposal
+    -- (2) re-submit same training proposal
+    proposalCid <- submit proposer do exerciseCmd trainingRights CreateTrainingPlanProposal with ..
+    submitMustFail proposer do exerciseCmd trainingRights CreateTrainingPlanProposal with ..
+    return ()
+
+
+-- | Test CheckProposalViaCid with correct and incorrect cid
+test_choice_proposalViaCid = script do
+    (TestParties{..}, oldProposalCid, rejectProposalCid) <- test_rejectProposal
+    trainingRights <- queryContractKey @TrainingRights proposer (issuer, proposer)
+    assert (isSome trainingRights)
+
+    -- verify that choice will provide the cid being looked into
+    submit proposer do exerciseCmd (fromSome trainingRights)._1 CheckProposalViaCid with cid = rejectProposalCid
+
+    -- verify that choice will fail if provided with not existing cids
+    submitMustFail proposer do exerciseCmd (fromSome trainingRights)._1 CheckProposalViaCid with cid = oldProposalCid
+    return ()
+
+
+-- | Test CheckApproveTrainingViaCid with correct and incorrect cid
+test_choice_approveTrainingViaCid = script do
+    (TestParties{..}, (oldCid, trainingCid)) <- test_approveProposal_flow
+    trainingRights <- queryContractKey @TrainingRights proposer (issuer, proposer)
+    assert (isSome trainingRights)
+
+    -- verify that choice will provide the cid being looked into
+    result <- submit proposer do exerciseCmd (fromSome trainingRights)._1 CheckApproveTrainingViaCid with cid = trainingCid
+    
+    -- verify that choice will fail if provided with not existing cids
+    submitMustFail proposer do exerciseCmd (fromSome trainingRights)._1 CheckApproveTrainingViaCid with cid = oldCid
+    return ()
+
+
+-- | Test CheckViaTitle with existing and non-existing titles
+test_choice_trainingViaTitle = script do
+    (TestParties{..}, (oldCid, trainingCid)) <- test_approveProposal_flow
+    trainingData <- queryContractId proposer trainingCid
+    trainingRights <- queryContractKey @TrainingRights proposer (issuer, proposer)
+    assert (isSome trainingRights)
+
+    result <- submit proposer do exerciseCmd (fromSome trainingRights)._1 CheckViaTitle with titles = [(fromSome trainingData).trainingPlan.title]
+    assert (not (null result))
+
+    result2 <- submit proposer do exerciseCmd (fromSome trainingRights)._1 CheckViaTitle with titles = ["this is not counted!"]
+    assertMsg "result2 is not expected" (result2 == [Right None])
+
+    result3 <- submit proposer do exerciseCmd (fromSome trainingRights)._1 CheckViaTitle with titles = [(fromSome trainingData).trainingPlan.title, ""]
+    assertMsg "result3 is not expected" (result3 == [(Right (trainingData)), Right None])
+
+    result4 <- submit proposer do exerciseCmd (fromSome trainingRights)._1 CheckViaTitle with titles = [(fromSome trainingData).trainingPlan.title, "", "this is not counted!"]
+    assertMsg "result4 is not expected" (result4 == [(Right (trainingData)), Right None, Right None])
+    return ()
+
+
+-- | Test to cancel a proposal
+test_cancelProposal = script do
+    -- create training proposal
+    (testParties@TestParties{..}, proposalCid) <- test_createTrainingProposal
+
+    -- verify training proposal exists
+    proposerView <- queryContractId proposer proposalCid
+    assert (isSome proposerView)
+
+    -- submit cancellation of proposal
+    submit proposer do exerciseCmd proposalCid CancelProposal
+
+    -- verify that contract is archived and no parties can view it
+    result <- queryContractIdFound testParties proposalCid
+    assert (isNone result._1 && isNone result._2 && isNone result._3
+        && isNone result._4._1 && isNone result._4._2 && isNone result._4._3)
+
+    return ()
+
+
+-- | This is just to test the "Archive" default choices if working
+-- can be use if only needed; for now we are expecting the "CancelProposal" choice to be use via Training Rights. 
+-- This 'archive' choice can be use during further extension of application.
+test_archiveChoice_TrainingProposal = script do
+    -- create training proposal
+    (testParties@TestParties{..}, proposalCid) <- test_createTrainingProposal
+
+    -- test the default archive choice
+    submit proposer do exerciseCmd proposalCid Archive
+
+    -- verify that contract is archived and no parties can view it
+    result <- queryContractIdFound testParties proposalCid
+    assert (isNone result._1 && isNone result._2 && isNone result._3
+        && isNone result._4._1 && isNone result._4._2 && isNone result._4._3)
+
+    return ()
+
+
+-- | This is just to test the "Archive" default choices if working
+-- This 'archive' choice can be use during further extension of application.
+test_archiveChoice_ApprovedTraining = script do
+    (testParties@TestParties{..}, (oldCid, trainingCid)) <- test_approveProposal_flow
+
+    -- test the default archive choice
+    submitMulti [proposer, supervisor] [] do exerciseCmd trainingCid Archive
+
+    -- verify that contract is archived and no parties can view it
+    result <- queryContractIdFound testParties trainingCid
+    assert (isNone result._1 && isNone result._2 && isNone result._3
+        && isNone result._4._1 && isNone result._4._2 && isNone result._4._3)
+
+    return ()
+
+
+-- | This is just to test the "Archive" default choices if working
+-- This 'archive' choice can be use during further extension of application.
+test_archiveChoice_trainingRights = script do
+    (testParties@TestParties{..}, trainingRights) <- setupUsers
+
+    -- verifyt that trainingRights is avaialble to proposer
+    proposerView <- queryContractId proposer trainingRights
+    assert (isSome proposerView)
+
+    -- archive trainingRights
+    submit issuer do exerciseCmd trainingRights Archive
+
+    -- verify that contract is archived and proposer can no longer view it
+    proposerView <- queryContractId proposer trainingRights
+    assert (isNone proposerView)
+    return ()
+
+
+{-- Below are the re-usable scripts called by above happy and unhappy path tests --}
+queryContractIdFound TestParties{..} cid = script do
+    supervisorView <- queryContractId supervisor cid
+    proposerView <- queryContractId proposer cid
+    trainingTeamView <- queryContractId trainingTeam cid
+    level1View <- queryContractId employeeLevel1 cid
+    level2View <- queryContractId employeeLevel2 cid
+    level3View <- queryContractId employeeLevel3 cid
+    return (supervisorView, proposerView, trainingTeamView, (level1View, level2View, level3View))
+
+
+approveAndValidateTrainingPlan TestParties{..} cid = script do
+    -- approve the training plan proposal
+    approveCid <- approveTrainingPlanProposal supervisor trainingTeam cid (date 2023 Jun 8)
+
+    -- verify whether contract is seen by expected parties
+    supervisorView <- queryContractId supervisor approveCid
+    proposerView <- queryContractId proposer approveCid
+    trainingTeamView <- queryContractId trainingTeam approveCid
+    level1View <- queryContractId employeeLevel1 approveCid
+    level2View <- queryContractId employeeLevel2 approveCid
+    level3View <- queryContractId employeeLevel3 approveCid
+    assert (isSome supervisorView && isSome proposerView && isSome trainingTeamView
+        && isNone level1View && isNone level2View && isNone level3View)
+
+    -- training team to publish the approved training plan manually
+    publishCid <- publishTrainingPlan trainingTeam approveCid (Some (date 2023 Jun 9))
+
+    -- verify whether contract is seen by expected parties
+    supervisorView <- queryContractId supervisor publishCid
+    proposerView <- queryContractId proposer publishCid
+    trainingTeamView <- queryContractId trainingTeam publishCid
+    level1View <- queryContractId employeeLevel1 publishCid
+    level2View <- queryContractId employeeLevel2 publishCid
+    level3View <- queryContractId employeeLevel3 publishCid
+    assert (isSome supervisorView && isSome proposerView && isSome trainingTeamView
+        && isNone level1View && isSome level2View && isSome level3View)
+
+    return (approveCid, publishCid)
+
+
+approveTrainingPlanProposal supervisor trainingTeam proposalCid approvalDate = script do
+    submit supervisor do exerciseCmd proposalCid Approve with ..
+
+
+publishTrainingPlan trainingTeam cid publishedDate = script do
+    submit trainingTeam do exerciseCmd cid Publish with ..
+
+
+rejectTrainingPlanProposal supervisor proposalCid supervisorNotes = script do
+    submit supervisor do exerciseCmd proposalCid Reject with ..
+
+
+updateTrainingPlanProposal proposer rejectProposalCid = script do
+    rejectedTrainingPlanProposal <- queryContractId proposer rejectProposalCid
+    assert (isSome rejectedTrainingPlanProposal)
+    let updatedTrainingPlan = (fromSome rejectedTrainingPlanProposal).trainingPlan
+            with courseDescription = ("This is a 1-week training that will act as a Java Springboot refresher for our Level 2 and 3 developers. " <>
+                    "The last day of the training will be dedicated to hands-on activities.")
+    
+    submit proposer do exerciseCmd rejectProposalCid UpdateProposal with ..

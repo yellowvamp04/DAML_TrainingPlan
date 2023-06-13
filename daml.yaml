@@ -1,0 +1,9 @@
+sdk-version: 2.6.4
+name: TrainingPlan
+source: daml
+version: 0.0.1
+init-script: Setup:setupUsers
+dependencies:
+  - daml-prim
+  - daml-stdlib
+  - daml-script

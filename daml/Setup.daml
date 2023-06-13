@@ -1,0 +1,63 @@
+module Setup where
+
+import Daml.Script
+
+import Main
+
+
+-- | data record that will hold all test parties
+data TestParties = TestParties with
+    issuer: Party
+    proposer: Party
+    supervisor: Party
+    trainingTeam: Party
+    employeeLevel1: Party
+    employeeLevel2: Party
+    employeeLevel3: Party
+
+
+-- | Allocate parties with the given display name
+setupTestParties = script do
+    issuer <- allocatePartyWithHint "Company" (PartyIdHint "Company")
+    supervisor <- allocatePartyWithHint "Supervisor" (PartyIdHint "Supervisor")
+    proposer <- allocatePartyWithHint "Proposer" (PartyIdHint "Proposer")
+    trainingTeam <- allocatePartyWithHint "TrainingTeam" (PartyIdHint "TrainingTeam")
+    employeeLevel1 <- allocatePartyWithHint "EmployeeLevel1" (PartyIdHint "Level1")
+    employeeLevel2 <- allocatePartyWithHint "EmployeeLevel2" (PartyIdHint "Level2")
+    employeeLevel3 <- allocatePartyWithHint "EmployeeLevel3" (PartyIdHint "Level3")
+    return (TestParties{..})
+
+-- | Setup users with rights
+setupUsers = script do
+    -- allocate parties
+    testParties@TestParties{..} <- setupTestParties
+
+    -- Construct userIds
+    issuerId <- validateUserId "Company"  
+    supervisorId <- validateUserId "Supervisor"   
+    trainingTeamId <- validateUserId "TrainingTeam"
+    aliceId <- validateUserId "Alice"
+    bobId <- validateUserId "Bob"
+    charlieId <- validateUserId "Charlie"
+    mathewId <- validateUserId "Mathew"
+    susanId <- validateUserId "Susan"
+    arnoldId <- validateUserId "Arnold"
+
+    -- Create users with the given rights 
+    createUser (User issuerId (Some issuer)) [CanActAs issuer]
+    createUser (User supervisorId (Some supervisor)) [CanActAs supervisor]
+    createUser (User trainingTeamId (Some trainingTeam)) [CanActAs trainingTeam]  
+    createUser (User aliceId (Some proposer)) [CanActAs proposer]
+    createUser (User bobId (Some employeeLevel1)) [CanActAs employeeLevel1]
+    createUser (User susanId (Some employeeLevel1)) [CanActAs employeeLevel1]
+    createUser (User charlieId (Some employeeLevel2)) [CanActAs employeeLevel2]
+    createUser (User mathewId (Some employeeLevel3)) [CanActAs employeeLevel3]
+
+    trainingRights <- setupInitContracts testParties
+    return (TestParties{..}, trainingRights)
+
+
+-- | setup initial training rights contract for the proposer
+setupInitContracts TestParties{..} = script do
+    submit issuer do createCmd TrainingRights with employee = proposer, ..
+    
